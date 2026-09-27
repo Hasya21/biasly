@@ -3,7 +3,8 @@ import { allSchedules, saveSchedule } from "../supabase/queries/schedules";
 import { SchedulerClient, SCHEDULE_CRON, providerDate } from "../scraping/oxylabs-scheduler";
 import { ScrapeError } from "../scraping/oxylabs";
 import { allActiveSources } from "./scrape";
-import { requireTime, withinBudget } from "./budget";
+import { requireTime, withinBudget, withinRequestBudget } from "./budget";
+import { SCHEDULER_REQUEST_BUDGET_MS } from "./limits";
 import { withPipelineLease } from "./lease";
 import type { Source } from "../supabase/types";
 import { randomUUID } from "node:crypto";
@@ -73,10 +74,10 @@ export async function reconcileSchedules(deps: ScheduleDependencies = scheduleDe
 }
 
 export function syncSchedules(): Promise<SyncSummary> {
-  return withPipelineLease("scheduler", async () => {
+  return withinRequestBudget(Date.now() + SCHEDULER_REQUEST_BUDGET_MS, () => withPipelineLease("scheduler", async () => {
     const summary = await withinBudget(Date.now() + 240_000, () => reconcileSchedules());
     try { await insertLog({ event_type: "scheduler_sync", level: summary.failed ? "warn" : "info", message: "Scheduler synchronization finished.", run_id: randomUUID(), context: summary }); }
     catch { summary.status = "partial"; summary.failed++; console.warn("[scheduler] sync log persistence failed"); }
     return summary;
-  });
+  }));
 }

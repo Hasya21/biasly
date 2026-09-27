@@ -13,8 +13,10 @@ export async function withPipelineLease<T>(name: "scheduler" | "hourly_pipeline"
   try { return await work(); }
   finally {
     await withoutBudget(async () => {
-      const result = await getSupabaseAdmin().rpc("release_pipeline_lease", { p_name: name, p_owner: owner });
-      if (result.error) console.warn("[pipeline] lease release failed; expires automatically");
+      try {
+        const result = await getSupabaseAdmin().rpc("release_pipeline_lease", { p_name: name, p_owner: owner });
+        if (result.error) console.warn("[pipeline] lease release failed; expires automatically");
+      } catch { console.warn("[pipeline] lease release failed; expires automatically"); }
     });
   }
 }

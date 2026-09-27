@@ -5,7 +5,7 @@ import { readScrapeOptions } from "@/lib/pipeline/scrape";
 import { runScheduledResults } from "@/lib/pipeline/scheduled-results";
 
 export const runtime = "nodejs";
-export const maxDuration = 800;
+export const maxDuration = 300;
 export async function POST(request: Request) {
   try {
     requireAdmin(request);

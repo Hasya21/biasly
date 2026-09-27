@@ -1,5 +1,11 @@
 # Project memory
 
+## Vercel Hobby compatibility correction — 2026-09-27
+
+- Deployment reported Hobby's 300-second maximum. Both previously 800-second scheduler route exports are now 300. Shared work budgets are 100 seconds for Cron scraping, 220 seconds for Cron analysis/standalone processing, and 270 seconds for the complete scheduler request. Cleanup can bypass the work deadline but cannot extend the enclosing request deadline; leases expire automatically if release fails.
+- The user had already changed `vercel.json` to `15 0 * * *`; preserve that daily configuration. It is nominally 00:15 UTC with Hobby's hour-level scheduling precision. Live Oxylabs collection remains hourly. Deferred work resumes at the next invocation, not necessarily next hour. Daily work may leave a backlog.
+- Earlier hourly/800-second deployment notes below describe the original implementation, not the current deployment configuration. No live schedules, secrets, database schema or provider settings changed for this correction.
+
 ## Oxylabs Scheduler and hourly Cron — 2026-09-27
 
 - Implemented schedule sync/status, done-only scheduled-result processing, run history, and `GET /api/cron/pipeline`. `vercel.json` registers `15 * * * *` UTC; Oxylabs uses `0 * * * *`. User selected all five active sources and five new valid articles per source per cycle.

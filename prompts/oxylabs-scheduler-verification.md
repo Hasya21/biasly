@@ -1,5 +1,32 @@
 # Oxylabs Scheduler verification — 2026-09-27
 
+## Follow-up: Hobby deployment correction
+
+The user reported Vercel rejecting an 800-second function on Hobby. Corrected both Cron and manual scheduled-processing route exports to 300. Reduced work budgets and introduced an enclosing 270-second request deadline that also constrains cleanup and lease release. The user's existing daily `15 0 * * *` expression was preserved; no live provider schedules or database schema were changed.
+
+Follow-up checks: `npm.cmd run typecheck` returned exit 0 with no diagnostics; `npm.cmd run build` returned exit 0 (compiled in 12.4s; TypeScript finished in 13.1s; 13 pages generated in 7.3s). The existing outside-repository package-lock warning remains. `npm.cmd run test:scheduler` returned:
+
+```text
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 44285.5222
+```
+
+Inspected the generated `.next/server/functions-config-manifest.json`, confirming:
+
+```json
+"/api/cron/pipeline": { "maxDuration": 300 },
+"/api/oxylabs/scheduled-results/process": { "maxDuration": 300 },
+"/api/oxylabs/schedules": { "maxDuration": 300 }
+```
+
+Redeploy the corrected revision on Hobby and confirm that the duration validation error is gone. The production deployment itself was not run here. Local testing remains `npm.cmd run dev`, then `curl.exe -i http://localhost:3000/api/cron/pipeline` in another terminal; watch the server terminal for progress. All exact admin curl commands below remain valid. The original hourly/800-second deployment assumptions below are historical; current Vercel processing is daily and Oxylabs collection is hourly. Deferred work may wait until the next day with this configuration.
+
 ## Implemented
 
 - Hourly Oxylabs schedule synchronization and renewal; stored schedule/run status routes.

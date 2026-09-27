@@ -4,15 +4,16 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { decodeProviderJson, SchedulerClient, type ProviderSchedule } from "../lib/scraping/oxylabs-scheduler";
 import { requireCron } from "../lib/api/cron";
-import { withinBudget } from "../lib/pipeline/budget";
+import { budgetSignal, remainingTime, withinBudget, withinRequestBudget, withoutBudget } from "../lib/pipeline/budget";
+import { CRON_SCRAPING_BUDGET_MS, CRON_ANALYSIS_BUDGET_MS, SCHEDULED_PROCESSING_BUDGET_MS, SCHEDULER_REQUEST_BUDGET_MS } from "../lib/pipeline/limits";
 import { reconcileSchedules, type ScheduleDependencies } from "../lib/pipeline/schedules";
 import { processScheduledResults, type ProcessingDependencies } from "../lib/pipeline/scheduled-results";
 import { executeCronPipeline } from "../lib/pipeline/cron";
 import { runAnalysis } from "../lib/pipeline/analyze";
 import { claimRetryableRun, finishScheduleRun } from "../lib/supabase/queries/schedules";
-import { GET as cronGet } from "../app/api/cron/pipeline/route";
+import { GET as cronGet, maxDuration as cronMaxDuration } from "../app/api/cron/pipeline/route";
 import { GET as listGet, POST as syncPost } from "../app/api/oxylabs/schedules/route";
-import { POST as processPost } from "../app/api/oxylabs/scheduled-results/process/route";
+import { POST as processPost, maxDuration as processMaxDuration } from "../app/api/oxylabs/scheduled-results/process/route";
 import { GET as runsGet } from "../app/api/oxylabs/runs/route";
 import type { Log, Schedule, ScheduleRun, Source } from "../lib/supabase/types";
 
@@ -20,6 +21,32 @@ const id = (n: number) => `12345678-1234-4234-8234-${String(n).padStart(12, "0")
 const source: Source = { id: id(1), name: "BBC News", listing_url: "https://www.bbc.com/news", parser_strategy: "bbc", active: true, logo_url: null, created_at: "", updated_at: "" };
 const remote: ProviderSchedule = { schedule_id: "9223372036854775807", active: true, items_count: 1, cron: "0 * * * *", end_time: "2032-01-01 00:00:00" };
 const row: Schedule = { id: id(2), source_id: source.id, schedule_id: remote.schedule_id, state: "active", listing_url: source.listing_url, created_at: "", updated_at: "" };
+
+test("scheduler routes and work phases fit Hobby with cleanup and response reserves", () => {
+  assert.equal(cronMaxDuration, 300);
+  assert.equal(processMaxDuration, 300);
+  assert.ok(CRON_SCRAPING_BUDGET_MS < CRON_ANALYSIS_BUDGET_MS);
+  assert.ok(CRON_ANALYSIS_BUDGET_MS <= SCHEDULER_REQUEST_BUDGET_MS - 50_000);
+  assert.ok(SCHEDULED_PROCESSING_BUDGET_MS <= SCHEDULER_REQUEST_BUDGET_MS - 50_000);
+  assert.ok(SCHEDULER_REQUEST_BUDGET_MS <= cronMaxDuration * 1000 - 30_000);
+});
+
+test("cleanup and nested pipeline calls cannot extend the request deadline", async t => {
+  let now = 1_000;
+  t.mock.method(Date, "now", () => now);
+  await withinRequestBudget(1_300, () => withinBudget(1_100, async () => {
+    assert.equal(remainingTime(), 100);
+    now = 1_101;
+    assert.throws(() => budgetSignal(30_000));
+    await withoutBudget(async () => {
+      assert.equal(remainingTime(), 199);
+      await withinRequestBudget(9_000, async () => assert.equal(remainingTime(), 199));
+      now = 1_301;
+      assert.throws(() => budgetSignal(30_000));
+    });
+  }));
+  assert.equal(remainingTime(), Infinity);
+});
 
 test("provider decoding preserves integer IDs and never changes quoted HTML/string content", () => {
   const result = decodeProviderJson('{"schedule_id":9223372036854775807,"runs":[{"run_id":9007199254740993,"jobs":[{"id":9223372036854775806,"result_status":"done"}]}],"items_count":1,"content":"{\\\"id\\\":9223372036854775807}"}') as { schedule_id: string; items_count: number; content: string; runs: { run_id: string; jobs: { id: string }[] }[] };

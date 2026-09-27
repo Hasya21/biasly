@@ -6,6 +6,19 @@ Implement the complete hourly workflow: Oxylabs collects each active stored sour
 
 Status: approved by the user with “Implement it”; implemented. See `prompts/oxylabs-scheduler-verification.md` for checks and live/deployment state.
 
+## Deployment compatibility correction — 2026-09-27
+
+The user's deployment failure identifies Vercel Hobby (300-second maximum). The working tree now has a user-modified daily Cron expression, `15 0 * * *`; preserve it. This is a correction to the approved scheduler's deployment/runtime handling, not a new provider configuration change.
+
+- Goal: remove invalid 800-second route exports and keep processing/cleanup inside Hobby's execution limit.
+- Guidance/code inspected: installed Next.js maxDuration guide, current Vercel duration/Cron docs, `lib/pipeline/{budget,lease,cron,scheduled-results,schedules,limits}.ts`, both affected route files, scheduler tests and project memory. Reuse previously read skills; no schema, provider or AI output changes.
+- Change the two 800-second route exports to literal 300. Reduce Cron processing to 100 seconds, analysis to an absolute 220-second work deadline, and standalone processing to 220 seconds. Bound the complete scheduler request (including leases and final writes) to 270 seconds, leaving 30 seconds before platform termination. Cleanup may exceed a work-phase deadline but must not bypass the request deadline.
+- Preserve the user's daily Vercel schedule, existing hourly Oxylabs schedules, secret checks, insertion limits, claims and pending-work recovery. Do not upgrade the plan, deploy, rotate secrets or change live schedules.
+- Files likely to change: the two route exports, shared pipeline limits/budget, lease cleanup, Cron/scheduled-results/sync entrypoints, regression tests, README and project memory.
+- Acceptance: all exported route durations are Hobby-compatible; nested cleanup respects the request deadline; phase failure still permits analysis; daily scheduling is documented honestly; no secrets from pasted output are copied into code/docs.
+- Checks: typecheck, lint, build, scheduler regression suite, and inspect generated Next route configuration for maxDuration 300. Preserve existing tests and add focused coverage for the shared deadline boundary.
+- Manual test: redeploy on Hobby; confirm the maxDuration error is gone; run `npm.cmd run dev`, then `curl.exe -i http://localhost:3000/api/cron/pipeline` and watch terminal logs. Existing admin POST/status curl commands below remain valid. On production, the unauthenticated Cron URL must return 401. The user's existing daily expression is nominally 00:15 UTC, subject to Hobby's scheduling precision.
+
 ## Skills and guidance read
 
 - `AGENTS.md` and `PROJECT_MEMORY.md`.

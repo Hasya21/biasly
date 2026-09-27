@@ -203,16 +203,16 @@ After success, refresh `/`, open the newly analyzed story, sign in with Clerk, a
 node --env-file=.env.local --conditions=react-server --import tsx scripts/verify-analysis.ts
 ```
 
-## Hourly Oxylabs Scheduler and Vercel Cron
+## Oxylabs Scheduler and Vercel Cron
 
 Apply `supabase/oxylabs-scheduler.sql` in Supabase Dashboard → SQL Editor before using the scheduler. It adds a stored source URL and private pipeline leases. The lease prevents concurrent schedule synchronization; jobs also have unique claims and stale-worker fencing. Keep existing RLS and service-role-only database access.
 
 Two independent setups enable automatic operation:
 
 1. Call `POST /api/oxylabs/schedules` once to activate an Oxylabs schedule for each active source. It collects the stored entry page at `0 * * * *`. Schedules last one year and are automatically replaced within seven days of expiry. Sync also replaces changed source URLs and deactivates inactive-source schedules. **The configured Oxylabs account must be dedicated to this app: sync deactivates provider schedules absent from this database.**
-2. Deploy `vercel.json` to a Vercel Pro or Enterprise project. Configure a generated `CRON_SECRET` in the production environment; Vercel sends it as an `Authorization: Bearer` header. Never add it to `.env.local`. Cron calls `/api/cron/pipeline` at `15 * * * *` UTC. Hobby does not support hourly Cron.
+2. Deploy `vercel.json` and configure a generated `CRON_SECRET` in the production environment; Vercel sends it as an `Authorization: Bearer` header. Never add it to `.env.local`. The current configuration uses the Hobby-compatible daily expression `15 0 * * *` (nominally 00:15 UTC; Hobby may invoke within that hour). For hourly processing, use Pro/Enterprise and change the expression to `15 * * * *`. Oxylabs homepage collection remains hourly independently of Vercel.
 
-Each hourly cycle processes completed homepage jobs and inserts up to five new valid articles per active source. It then analyzes all eligible pending articles, including existing backlog and embedding backfills, even if processing failed. Functions use an 800-second duration with earlier internal deadlines; unfinished work remains eligible next hour. Completed jobs are skipped; failed/stale jobs can retry, except expired results returning 404. Two global leases expire after 15 minutes if a process dies. Production Cron requires its own secret; the admin secret does not authorize it.
+Each invocation processes completed homepage jobs and inserts up to five new valid articles per active source. It then analyzes eligible pending articles, including existing backlog and embedding backfills, even if processing failed. Routes use a 300-second duration. Cron's processing deadline is 100 seconds and its analysis work deadline is 220 seconds from pipeline start; standalone processing also gets 220 seconds. A 270-second request deadline bounds database/provider calls and cleanup, leaving response time before platform termination. Unfinished work remains eligible on the next invocation, which is daily with the current Vercel configuration. Completed jobs are skipped; failed/stale jobs can retry, except expired results returning 404. Daily processing with this work budget may not drain an hourly collection backlog. Two global leases expire after 15 minutes if a process dies. Production Cron requires its own secret; the admin secret does not authorize it.
 
 Start `npm.cmd run dev` and watch its terminal for scheduler, scrape and analysis logs. In a second PowerShell terminal set `$env:BIASLY_ADMIN_SECRET` to your existing secret, then use:
 
@@ -235,7 +235,7 @@ curl.exe -i "http://localhost:3000/api/oxylabs/runs?scheduleId=$scheduleRowId&li
 curl.exe -i http://localhost:3000/api/logs -H "x-biasly-admin-secret: $env:BIASLY_ADMIN_SECRET"
 ```
 
-Manual processing accepts optional `sourceIds` (active source UUIDs) and `limitPerSource` (1–20); schedule sync always reconciles all active sources. Before the first hourly provider run, zero completed jobs is expected. Calling the process route does not run analysis; use the local Cron route above or `POST /api/analyze` to run both stages separately. In production, an unauthenticated request to the Cron route must return 401. Confirm the registered hourly trigger and actual execution in Vercel's Cron controls/logs after deployment.
+Manual processing accepts optional `sourceIds` (active source UUIDs) and `limitPerSource` (1–20); schedule sync always reconciles all active sources. Before the first hourly provider run, zero completed jobs is expected. Calling the process route does not run analysis; use the local Cron route above or `POST /api/analyze` to run both stages separately. In production, an unauthenticated request to the Cron route must return 401. Confirm the registered daily trigger and actual execution in Vercel's Cron controls/logs after deployment.
 
 Offline regression: `npm.cmd run test:scheduler`. Hosted schema/lease/provider verification:
 

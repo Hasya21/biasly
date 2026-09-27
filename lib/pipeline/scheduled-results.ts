@@ -6,8 +6,9 @@ import { ScrapeError } from "../scraping/oxylabs";
 import { publisherUrl } from "../parsing/urls";
 import { processHomepage, defaultScrapeDependencies, type ScrapeOptions, type ScrapeSummary } from "./scrape";
 import { scheduleDependencies, reconcileSchedules } from "./schedules";
-import { remainingTime, requireTime, withinBudget, withoutBudget } from "./budget";
+import { remainingTime, requireTime, withinBudget, withoutBudget, withinRequestBudget } from "./budget";
 import { withPipelineLease } from "./lease";
+import { SCHEDULED_PROCESSING_BUDGET_MS, SCHEDULER_REQUEST_BUDGET_MS } from "./limits";
 
 export const processingDependencies = { ...scheduleDependencies, scrape: defaultScrapeDependencies, claim: claimRetryableRun, finish: finishScheduleRun, reconcile: reconcileSchedules };
 export type ProcessingDependencies = typeof processingDependencies;
@@ -89,6 +90,6 @@ export async function processScheduledResults(options: ScrapeOptions, deps: Proc
   return summary;
 }
 
-export function runScheduledResults(options: ScrapeOptions, deadline = Date.now() + 720_000): Promise<ScheduledSummary> {
-  return withPipelineLease("scheduler", () => withinBudget(deadline, () => processScheduledResults(options)));
+export function runScheduledResults(options: ScrapeOptions, deadline = Date.now() + SCHEDULED_PROCESSING_BUDGET_MS): Promise<ScheduledSummary> {
+  return withinRequestBudget(Date.now() + SCHEDULER_REQUEST_BUDGET_MS, () => withPipelineLease("scheduler", () => withinBudget(deadline, () => processScheduledResults(options))));
 }
