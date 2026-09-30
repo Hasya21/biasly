@@ -106,7 +106,7 @@ All runtime modules import `server-only`. `getSupabaseAdmin()` creates a typed c
 | `queries/schedules.ts` | `saveSchedule(input)`, `getSchedules({ limit?, offset? })`, `claimScheduleRun(input)`, `finishScheduleRun(id, status, summary?, errorCode?)`, `getScheduleRuns(scheduleId, options?)` |
 
 - Pages contain at most 100 rows (20 by default; active sources default to 100; pending articles default to 5). Continue paging active sources/schedules until an empty page when callers need all records. Reader lists sort by publication date and ID; offset pagination is deterministic for a stable dataset but can shift as new rows arrive.
-- Pending reads use an actual LEFT JOIN against analyses, regardless of `analyzed_at`. Advance `after` using the last row's `{ scraped_at, id }`, including when an article fails, until an empty page. Start without a cursor next run to retry failures and discover new records. An explicit empty `articleIds` or source `ids` array selects nothing.
+- Pending reads use an actual LEFT JOIN against analyses, regardless of `analyzed_at`. Advance `after` using the last row's `{ scraped_at, id }`, including when an article fails, until an empty page. This cursor helper remains available for diagnostics; the analysis worker uses `get_analysis_candidates` and durable claims for fair scheduling and retry delays. An explicit empty `articleIds` or source `ids` array selects nothing.
 - Feed reads require both saved analysis and `analyzed_at`, return a bounded source/analysis projection, and omit raw text. Detail reads return raw text/full analysis and are protected by the server page loader; future callers must enforce the same authorization. Missing records return null; query failures throw a sanitized `DataAccessError` rather than pretending the database is empty.
 - Insert inputs must already have passed the scraping layer's source-specific article/title/content checks and cleanup. This persistence layer checks required fields, HTTP(S) URLs, and a minimum body of 900 trimmed characters or three paragraphs of at least 40 characters. It cannot establish semantic article quality or detect all webpage boilerplate. URL normalization removes fragments and preserves query parameters and path semantics.
 - Article insertion returns `{ status: 'inserted', article }` or `{ status: 'duplicate' }`. It never replaces a record. URL checks query both columns in chunks of at most 15; the database trigger also enforces cross-column identity under a transaction advisory lock. Article URLs are immutable. Insert transactions must use READ COMMITTED (the default); other isolation levels are rejected to prevent stale-snapshot races. The lock briefly serializes inserts and is intended for this small ingestion workload.
@@ -174,7 +174,7 @@ Use IDs from `/api/sources` in other databases. Watch the Next.js dev-server ter
 
 ## AI article analysis
 
-`POST /api/analyze` processes stored pending articles using OpenAI through the Vercel AI SDK. Configure server-only `OPENAI_API_KEY`, `BIASLY_ADMIN_SECRET`, and existing Supabase credentials in `.env.local`. `ANALYSIS_BATCH_SIZE` is an integer from 1 to 100 (default 5). The model is `gpt-5.4-mini`; each analysis records the actual response model identifier. No schema changes are needed for this stage.
+`POST /api/analyze` processes stored pending articles using OpenAI through the Vercel AI SDK. Configure server-only `OPENAI_API_KEY`, `BIASLY_ADMIN_SECRET`, and existing Supabase credentials in `.env.local`. `ANALYSIS_BATCH_SIZE` is an integer from 1 to 100 (default 5). The model is `gpt-5.4-mini`; each analysis records the actual response model identifier. Apply `supabase/news-pipeline-freshness.sql` before deploying the current analysis worker.
 
 Start `npm.cmd run dev` and watch its terminal for batch progress and the final summary. In another PowerShell terminal, set `$env:BIASLY_ADMIN_SECRET` to the same configured secret, then run:
 
@@ -189,13 +189,13 @@ curl.exe -i -X POST http://localhost:3000/api/analyze -H "x-biasly-admin-secret:
 curl.exe -i 'http://localhost:3000/api/logs?limit=20' -H "x-biasly-admin-secret: $env:BIASLY_ADMIN_SECRET"
 ```
 
-Missing/wrong admin headers return 401, malformed options return 400, oversized requests return 413, and GET returns 405. Completed/partial runs return 200 with an explicit status; fatal runs without saved analyses return 502. `limit` caps attempts, including skipped/failed articles. Empty body or `{}` processes the entire pending set. Selection accepts 1–100 UUIDs. Unknown fields are rejected. The summary includes counts, batches, failure categories, logging failures, duration and stop reason. A `completed` limited run only means the requested limit was processed, not that the entire backlog is empty.
+Missing/wrong admin headers return 401, malformed options return 400, oversized requests return 413, and GET returns 405. Completed/partial runs return 200 with an explicit status; fatal runs without saved analyses return 502. `limit` caps attempts, including skipped/failed articles. Empty body or `{}` processes eligible pending work across batches until exhausted or the execution deadline. Cooling-down articles wait until a later invocation. Selection accepts 1–100 UUIDs. Unknown fields are rejected. The summary includes counts, batches, failure categories, logging failures, duration and stop reason. A `completed` limited run only means the requested limit was processed, not that the entire backlog is empty.
 
-Articles are pending when their analysis row is absent, even if analyzed_at is already set. Each run advances past unsuccessful rows; a later invocation retries them. Validated results are saved with the existing atomic RPC, which derives bias_score and sets analyzed_at together. Existing results are preserved. Concurrent invocations may spend tokens twice for the same article, although the first saved analysis wins. Avoid overlapping manual runs.
+Articles are pending when their analysis row is absent or their embedding is missing, regardless of analyzed_at. The durable queue alternates recent stories (scraped within 24 hours) with older backlog, including across one-article invocations. Unattempted articles precede retries within each group. Failures wait 15 minutes, doubling on repeated failures up to seven days. Explicit IDs still respect retry eligibility. Atomic ten-minute claims prevent overlapping workers from analyzing the same article; interrupted claims expire. Validated analysis and embedding are saved atomically before publication, and existing results are preserved.
 
 Generation is sequential within batches, with a 90-second timeout per attempt and at most two calls per article: invalid structured output retries once; transport errors do not automatically retry. Credential/access/quota errors (401/403/429) stop the run. Inputs exceeding 60,000 title/body characters are skipped rather than truncated. Invalid inputs are skipped; invalid output never publishes. Framing confidence below 0.5 requires unclear; otherwise a top-two percentage gap below 10 points requires mixed, and other labels match the strongest percentage. Loaded terms must occur in the article text. These consistency rules are application conventions, not a claim of objective political measurement.
 
-Hosting request-duration limits still apply to the whole synchronous invocation. Batching does not bypass them: use limited requests on constrained hosts, or run the reusable pipeline in a sufficiently long-lived server process. Interrupted runs can be restarted safely. This stage does not install Scheduler, Cron, embeddings or related articles.
+Manual analysis has a 300-second Vercel ceiling, a 220-second work budget and a 270-second request budget. Cron analysis respects its enclosing deadline. A partial deadline result resumes eligible work on a later invocation. The `eligible_exhausted` stop reason means no currently eligible work remains; it does not imply that failed or claimed articles are absent.
 
 After success, refresh `/`, open the newly analyzed story, sign in with Clerk, and inspect its saved summary, sentiment, AI-estimated framing, percentages, confidence, notes, terms and disclaimer. Run `npm.cmd run test:analysis` for offline tests. The explicit paid smoke test below analyzes at most one pending article and verifies its persistence/publication and that a repeat run skips it:
 
@@ -261,3 +261,19 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Publication freshness and recovery
+
+Apply `supabase/news-pipeline-freshness.sql` in Dashboard > SQL Editor **before deploying** this update. The upgrade is additive and re-runnable. It adds service-only analysis work state, three private RPCs, and `oxylabs_schedules.last_attempted_at`; no articles or analyses are deleted.
+
+Scheduled sources run in least-recently-attempted order. An attempt is recorded before provider calls, so slow or failing sources also yield their next turn. The current Hobby cron remains daily (`15 0 * * *`); Oxylabs still collects hourly. A short invocation may not reach all five sources, but subsequent invocations prioritize those deferred. Switching to hourly Vercel processing is a separate hosting change.
+
+Run `npm.cmd run test:freshness`, `npm.cmd run test:analysis`, and `npm.cmd run test:scheduler` for offline queue, validation, deadline and source-fairness checks. The queue database test substitutes an array for the pre-existing pgvector column because bundled PGlite has no vector extension; it tests embedding NULL eligibility, not vector operations.
+
+After applying the SQL, verify the live schema and anonymous-access denial without paid model calls:
+
+```powershell
+node --env-file=.env.local --conditions=react-server --import tsx scripts/verify-news-freshness.ts
+```
+
+Add `--recover` to analyze **one** recent eligible article and verify publication, saved embedding, and repeat-run deduplication. This incurs model usage and holds the Cron lease to avoid overlapping that pipeline. After deployment, run the registered Cron through Vercel, inspect `scheduler_finished` and `analysis_finished` logs, and refresh the homepage. New stories appear only once valid analysis and embeddings have been saved. An already-open browser tab does not poll automatically.

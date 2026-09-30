@@ -28,6 +28,7 @@ export type Log = {
 export type Schedule = {
   id: string; source_id: string; schedule_id: string; state: "active" | "inactive";
   listing_url: string | null;
+  last_attempted_at: string | null;
   created_at: string; updated_at: string;
 };
 export type ScheduleRun = {
@@ -53,16 +54,23 @@ type Table<Row, Insert, Relations, Update = Partial<Insert>> = {
 export type Database = {
   public: {
     Tables: {
+      article_analysis_work: Table<{
+        article_id: string; attempt_token: string; last_run_id: string; last_attempted_at: string;
+        was_fresh: boolean; in_progress: boolean; failures: number; next_attempt_at: string; error_code: string | null;
+      }, never, [Relationship<"article_analysis_work_article_id_fkey", "article_id", "articles", true>]>;
       pipeline_leases: Table<{ name: "scheduler" | "hourly_pipeline"; owner: string; expires_at: string }, { name: "scheduler" | "hourly_pipeline"; owner: string; expires_at: string }, []>;
       sources: Table<Source, NewSource, []>;
       articles: Table<Article, NewArticle, [Relationship<"articles_source_id_fkey", "source_id", "sources">], { analyzed_at?: string | null }>;
       article_analyses: Table<ArticleAnalysis, NewAnalysis & { article_id: string }, [Relationship<"article_analyses_article_id_fkey", "article_id", "articles", true>], Record<string, never>>;
       logs: Table<Log, NewLog, [Relationship<"logs_source_id_fkey", "source_id", "sources">, Relationship<"logs_article_id_fkey", "article_id", "articles">], Record<string, never>>;
-      oxylabs_schedules: Table<Schedule, NewSchedule, [Relationship<"oxylabs_schedules_source_id_fkey", "source_id", "sources", true>]>;
+      oxylabs_schedules: Table<Schedule, NewSchedule, [Relationship<"oxylabs_schedules_source_id_fkey", "source_id", "sources", true>], Partial<NewSchedule> & { last_attempted_at?: string }>;
       oxylabs_schedule_runs: Table<ScheduleRun, NewRun, [Relationship<"oxylabs_schedule_runs_schedule_id_fkey", "schedule_id", "oxylabs_schedules">], Partial<Pick<ScheduleRun, "status" | "started_at" | "completed_at" | "summary" | "error_code">>>;
     };
     Views: Record<string, never>;
     Functions: {
+      get_analysis_candidates: { Args: { p_run_id: string; p_limit?: number; p_article_ids?: string[] }; Returns: PendingArticle[] };
+      claim_article_analysis: { Args: { p_article_id: string; p_run_id: string }; Returns: string | null };
+      finish_article_analysis: { Args: { p_article_id: string; p_token: string; p_success: boolean; p_error_code?: string }; Returns: boolean };
       acquire_pipeline_lease: { Args: { p_name: string; p_owner: string }; Returns: boolean };
       release_pipeline_lease: { Args: { p_name: string; p_owner: string }; Returns: undefined };
       valid_article_body: { Args: { body: string }; Returns: boolean };

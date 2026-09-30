@@ -1,5 +1,13 @@
 # Project memory
 
+## Publication freshness correction - 2026-09-29
+
+- September 28/29 Cron logs showed 10 insertions per day, all 20 still awaiting analysis. Old invalid-output failures repeatedly consumed analysis time; alphabetical scraping reached only AP/BBC.
+- Current implementation adds durable `article_analysis_work` claims, fair fresh/backlog selection, exponential retry cooldown (15 minutes to seven days), and safe validation categories with targeted retry feedback. Claims expire after ten minutes and completions require the current token. Manual analysis now shares bounded work/request deadlines and exports maxDuration 300.
+- Source order uses persisted `oxylabs_schedules.last_attempted_at`; less recently attempted sources go first. Processing remains sequential and may span daily invocations. Preserve the current daily Hobby Cron and hourly Oxylabs collection.
+- Apply `supabase/news-pipeline-freshness.sql` before deployment. All 27 queue/analysis/scheduler tests, typecheck, lint, and build passed. The user applied the upgrade; live schema/anonymous denial and one-article recovery passed. Article a0a6647f-b7e9-4b52-9fb9-33c1adf25134 now has analysis plus embedding and is published; repeat processing attempted zero articles. Deployment and the next scheduled production invocation remain unverified. Run `scripts/verify-news-freshness.ts` read-only, or add `--recover` for one paid recent-article verification under the Cron lease.
+- The old `get_pending_articles` cursor RPC remains a diagnostic helper. Runtime analysis uses `get_analysis_candidates`; `eligible_exhausted` does not mean the cooling-down backlog is empty. Earlier analysis notes below describe pre-correction behavior.
+
 ## Vercel Hobby compatibility correction — 2026-09-27
 
 - Deployment reported Hobby's 300-second maximum. Both previously 800-second scheduler route exports are now 300. Shared work budgets are 100 seconds for Cron scraping, 220 seconds for Cron analysis/standalone processing, and 270 seconds for the complete scheduler request. Cleanup can bypass the work deadline but cannot extend the enclosing request deadline; leases expire automatically if release fails.

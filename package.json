@@ -11,6 +11,7 @@
     "test:db": "node scripts/test-database.mjs",
     "test:data": "node --conditions=react-server --import tsx --test tests/supabase.test.ts",
     "test:scraping": "node --conditions=react-server --import tsx --test tests/scraping.test.ts",
+    "test:freshness": "node --conditions=react-server --import tsx --test tests/freshness.test.ts",
     "test:analysis": "node --conditions=react-server --import tsx --test tests/analysis.test.ts",
     "verify:supabase": "node --env-file=.env.local --conditions=react-server --import tsx scripts/verify-supabase.ts",
     "test:scheduler": "node --conditions=react-server --import tsx --test tests/scheduler.test.ts"

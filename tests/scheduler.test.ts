@@ -20,7 +20,7 @@ import type { Log, Schedule, ScheduleRun, Source } from "../lib/supabase/types";
 const id = (n: number) => `12345678-1234-4234-8234-${String(n).padStart(12, "0")}`;
 const source: Source = { id: id(1), name: "BBC News", listing_url: "https://www.bbc.com/news", parser_strategy: "bbc", active: true, logo_url: null, created_at: "", updated_at: "" };
 const remote: ProviderSchedule = { schedule_id: "9223372036854775807", active: true, items_count: 1, cron: "0 * * * *", end_time: "2032-01-01 00:00:00" };
-const row: Schedule = { id: id(2), source_id: source.id, schedule_id: remote.schedule_id, state: "active", listing_url: source.listing_url, created_at: "", updated_at: "" };
+const row: Schedule = { id: id(2), source_id: source.id, schedule_id: remote.schedule_id, state: "active", listing_url: source.listing_url, last_attempted_at: null, created_at: "", updated_at: "" };
 
 test("scheduler routes and work phases fit Hobby with cleanup and response reserves", () => {
   assert.equal(cronMaxDuration, 300);
@@ -129,6 +129,7 @@ function processingHarness() {
   const deps: ProcessingDependencies = {
     sources: async () => [source], schedules: async () => [row], save: async () => row, provider,
     reconcile: async () => ({ status: "completed", created: 0, reused: 1, reactivated: 0, deactivated: 0, failed: 0, duration_ms: 0 }),
+    markAttempt: async () => {},
     claim: async input => { claims.push(input.job_id); return complete.has(input.job_id) ? null : claim(input.job_id); },
     finish: async (_id, status, summary = {}, code, startedAt) => { assert.equal(startedAt, "2026-09-27T00:00:00Z"); if (status === "completed") complete.add(claims.at(-1)!); return { ...claim(claims.at(-1)!), status, summary, error_code: code ?? null }; },
     scrape: {
@@ -158,6 +159,28 @@ test("deadline leaves jobs unclaimed; bad selections are rejected before sync", 
   assert.equal(h.claims.length, 0);
   await assert.rejects(processScheduledResults({ limitPerSource: 5, sourceIds: [id(99)] }, h.deps));
 });
+
+test("persisted source order gives all five sources a turn across short invocations", async t => {
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const h = processingHarness();
+  const sources = Array.from({ length: 5 }, (_, i) => ({ ...source, id: id(20 + i), name: `Source ${i}` }));
+  const schedules = sources.map((s, i) => ({ ...row, id: id(30 + i), source_id: s.id, schedule_id: String(50 + i) }));
+  const visited: string[] = [];
+  h.deps.sources = async () => sources;
+  h.deps.schedules = async () => schedules;
+  h.deps.markAttempt = async scheduleId => {
+    const schedule = schedules.find(s => s.id === scheduleId)!;
+    schedule.last_attempted_at = new Date(now).toISOString();
+    visited.push(schedule.source_id);
+  };
+  h.deps.provider.runs = async () => { now += 45_000; return []; };
+  for (let run = 0; run < 3; run++) {
+    await withinBudget(now + 100_000, () => processScheduledResults({ limitPerSource: 5 }, h.deps));
+  }
+  assert.deepEqual(visited.slice(0, 5), sources.map(s => s.id));
+  assert.equal(new Set(visited.slice(0, 5)).size, 5);
+});
 test("a result for an unrelated listing fails the claim without scraping details", async () => {
   const h = processingHarness();
   h.deps.provider.result = async () => ({ url: "https://www.bbc.com/sport", html: "wrong listing" });
@@ -171,7 +194,7 @@ test("Cron always calls analysis after a thrown processing error", async () => {
   let called = false;
   const result = await executeCronPipeline({
     process: async () => { throw new Error("provider failure"); },
-    analyze: async () => { called = true; return runAnalysis({}, { pending: async () => [], configure: () => {}, analyze: async () => { throw new Error(); }, embed: async () => [], save: async () => { throw new Error(); }, saveEmbedding: async () => { throw new Error(); }, log: async input => ({ ...input, id: id(8) } as Log) }); },
+    analyze: async () => { called = true; return runAnalysis({}, { pending: async () => [], claim: async () => null, finish: async () => {}, configure: () => {}, analyze: async () => { throw new Error(); }, embed: async () => [], save: async () => { throw new Error(); }, saveEmbedding: async () => { throw new Error(); }, log: async input => ({ ...input, id: id(8) } as Log) }); },
     log: async input => ({ ...input, id: id(8) } as Log),
   });
   assert.equal(called, true);

@@ -331,3 +331,126 @@ grant execute on function public.acquire_pipeline_lease(text, uuid) to service_r
 grant execute on function public.release_pipeline_lease(text, uuid) to service_role;
 notify pgrst, 'reload schema';
 commit;
+
+-- Durable publication progress (also available as an existing-project upgrade).
+-- Existing-project upgrade. Apply before deploying the corresponding application code.
+begin;
+
+alter table public.oxylabs_schedules add column if not exists last_attempted_at timestamptz;
+
+create table if not exists public.article_analysis_work (
+  article_id uuid primary key references public.articles(id) on delete cascade,
+  attempt_token uuid not null,
+  last_run_id uuid not null,
+  last_attempted_at timestamptz not null,
+  was_fresh boolean not null,
+  in_progress boolean not null default true,
+  failures integer not null default 0 check (failures >= 0),
+  next_attempt_at timestamptz not null,
+  error_code text check (error_code ~ '^[a-z0-9_]{1,64}$')
+);
+create index if not exists article_analysis_work_latest_idx
+  on public.article_analysis_work(last_attempted_at desc, article_id);
+alter table public.article_analysis_work enable row level security;
+revoke all on public.article_analysis_work from public, anon, authenticated;
+grant select, insert, update on public.article_analysis_work to service_role;
+
+-- Interleave fresh stories and backlog. Within each lane, never-attempted work
+-- precedes retries; retries are ordered by their last attempt, not article age.
+-- The last claimed lane survives requests, including requests that process just one item.
+create or replace function public.get_analysis_candidates(
+  p_run_id uuid, p_limit integer default 5, p_article_ids uuid[] default null
+) returns table (
+  id uuid, source_id uuid, original_url text, canonical_url text, title text,
+  image_url text, published_at timestamptz, raw_text text, scraped_at timestamptz,
+  analyzed_at timestamptz, needs_analysis boolean, analysis_summary text
+)
+language plpgsql stable security invoker set search_path = '' as $$
+begin
+  if p_run_id is null or p_limit is null or p_limit < 1 or p_limit > 100 then
+    raise exception 'Invalid analysis selection' using errcode = '22023';
+  end if;
+  return query
+  with eligible as (
+    select a.id, a.scraped_at, w.last_attempted_at,
+      a.scraped_at >= now() - interval '24 hours' as fresh
+    from public.articles a
+    left join public.article_analyses analysis on analysis.article_id = a.id
+    left join public.article_analysis_work w on w.article_id = a.id
+    where (analysis.id is null or analysis.embedding is null)
+      and (p_article_ids is null or a.id = any(p_article_ids))
+      and (w.article_id is null or (w.next_attempt_at <= now() and w.last_run_id <> p_run_id))
+  ), ranked as (
+    select e.id, e.fresh, row_number() over (
+      partition by e.fresh
+      order by e.last_attempted_at asc nulls first,
+        case when e.fresh then e.scraped_at end desc,
+        e.scraped_at asc, e.id
+    ) as position from eligible e
+  ), turn as (
+    select coalesce((select not w.was_fresh from public.article_analysis_work w
+      order by w.last_attempted_at desc, w.article_id limit 1), true) as fresh_first
+  ), chosen as (
+    select r.id, r.position, r.fresh = t.fresh_first as preferred
+    from ranked r cross join turn t
+    order by r.position, preferred desc, r.id limit p_limit
+  )
+  select a.id, a.source_id, a.original_url, a.canonical_url, a.title,
+    a.image_url, a.published_at, a.raw_text, a.scraped_at, a.analyzed_at,
+    analysis.id is null, analysis.summary
+  from chosen c join public.articles a on a.id = c.id
+  left join public.article_analyses analysis on analysis.article_id = a.id
+  order by c.position, c.preferred desc, c.id;
+end;
+$$;
+
+-- A short atomic claim prevents overlapping manual/Cron calls from paying for
+-- the same article. An interrupted worker becomes retryable after 10 minutes.
+create or replace function public.claim_article_analysis(p_article_id uuid, p_run_id uuid)
+returns uuid language plpgsql security invoker set search_path = '' as $$
+declare claimed uuid;
+begin
+  if p_run_id is null then raise exception 'Run ID required' using errcode = '22023'; end if;
+  insert into public.article_analysis_work as work
+    (article_id, attempt_token, last_run_id, last_attempted_at, was_fresh, next_attempt_at)
+  select a.id, gen_random_uuid(), p_run_id, clock_timestamp(),
+    a.scraped_at >= now() - interval '24 hours', now() + interval '10 minutes'
+  from public.articles a left join public.article_analyses analysis on analysis.article_id = a.id
+  where a.id = p_article_id and (analysis.id is null or analysis.embedding is null)
+  on conflict (article_id) do update set
+    attempt_token = excluded.attempt_token, last_run_id = excluded.last_run_id,
+    last_attempted_at = excluded.last_attempted_at, was_fresh = excluded.was_fresh,
+    next_attempt_at = excluded.next_attempt_at, in_progress = true
+  where work.next_attempt_at <= now() and work.last_run_id <> p_run_id
+  returning attempt_token into claimed;
+  return claimed;
+end;
+$$;
+
+create or replace function public.finish_article_analysis(
+  p_article_id uuid, p_token uuid, p_success boolean, p_error_code text default null
+) returns boolean language plpgsql security invoker set search_path = '' as $$
+begin
+  if p_success is null or (not p_success and (p_error_code is null or p_error_code !~ '^[a-z0-9_]{1,64}$')) then
+    raise exception 'Invalid analysis completion' using errcode = '22023';
+  end if;
+  update public.article_analysis_work set
+    in_progress = false,
+    failures = case when p_success then 0 else least(failures + 1, 30) end,
+    next_attempt_at = case when p_success then now() else
+      now() + least(interval '7 days', interval '15 minutes' * power(2, least(failures, 10))) end,
+    error_code = case when p_success then null else p_error_code end
+  where article_id = p_article_id and attempt_token = p_token and in_progress;
+  return found;
+end;
+$$;
+
+revoke all on function public.get_analysis_candidates(uuid, integer, uuid[]) from public, anon, authenticated;
+revoke all on function public.claim_article_analysis(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.finish_article_analysis(uuid, uuid, boolean, text) from public, anon, authenticated;
+grant execute on function public.get_analysis_candidates(uuid, integer, uuid[]) to service_role;
+grant execute on function public.claim_article_analysis(uuid, uuid) to service_role;
+grant execute on function public.finish_article_analysis(uuid, uuid, boolean, text) to service_role;
+
+notify pgrst, 'reload schema';
+commit;

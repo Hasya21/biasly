@@ -66,30 +66,10 @@ export function toStoredAnalysis(
     (term) => !normalize(articleText).includes(normalize(term)),
   );
 
-  console.log("[analysis-validation]", {
-    total,
-    percentagesValid: total === 100,
-
-    returnedLabel: a.politicalFramingLabel,
-    expectedLabel,
-    labelValid: a.politicalFramingLabel === expectedLabel,
-
-    sentimentScore: a.sentimentScore,
-    returnedSentiment: a.sentimentLabel,
-    expectedSentiment,
-    sentimentValid: a.sentimentLabel === expectedSentiment,
-
-    invalidLoadedTerms,
-  });
-
-  if (
-    total !== 100 ||
-    a.politicalFramingLabel !== expectedLabel ||
-    a.sentimentLabel !== expectedSentiment ||
-    invalidLoadedTerms.length > 0
-  ) {
-    throw new AnalysisError("invalid_output");
-  }
+  if (total !== 100) throw new AnalysisError("invalid_output_percentages");
+  if (a.politicalFramingLabel !== expectedLabel) throw new AnalysisError("invalid_output_framing");
+  if (a.sentimentLabel !== expectedSentiment) throw new AnalysisError("invalid_output_sentiment");
+  if (invalidLoadedTerms.length) throw new AnalysisError("invalid_output_evidence");
   return validateAnalysis({
     summary: a.summary,
     sentiment_score: a.sentimentScore,

@@ -31,10 +31,17 @@ otherwise label the largest percentage (left, center, or right).
 Framing notes must explain evidence and uncertainty. Loaded terms must be exact quotations present in the title or body;
 return an empty loadedTerms array if none are supported. Do not invent quotations.`;
 
+const validationFeedback: Record<string, string> = {
+  invalid_output_percentages: "The three integer percentages must sum to exactly 100.",
+  invalid_output_framing: "Use unclear below confidence 0.5; otherwise mixed if the top percentages differ by less than 10; otherwise use the largest percentage's label.",
+  invalid_output_sentiment: "Match the sentiment label to the score: below -0.1 negative, above 0.1 positive, otherwise neutral.",
+  invalid_output_evidence: "Every loaded term must be an exact substring of the supplied title or body. Omit unsupported terms; an empty array is valid.",
+};
+
 export type GeneratedAnalysis = { output: unknown; model: string };
-export type AnalysisGenerator = (article: Article, retry: boolean, observability?: AiObservabilityContext) => Promise<GeneratedAnalysis>;
-const generate: AnalysisGenerator = async (article, retry, observability) => {
-  const system = instructions + (retry ? "\nThe previous attempt failed validation. Carefully check every constraint before returning a complete result." : "");
+export type AnalysisGenerator = (article: Article, retry: boolean, observability?: AiObservabilityContext, feedback?: string) => Promise<GeneratedAnalysis>;
+const generate: AnalysisGenerator = async (article, retry, observability, feedback) => {
+  const system = instructions + (retry ? `\nThe previous attempt failed validation. ${feedback ?? "Check all schema constraints."} Return a complete corrected result.` : "");
   const prompt = JSON.stringify({ title: article.title, body: article.raw_text });
   const startedAt = Date.now();
   const result = await generateText({
@@ -73,13 +80,15 @@ export function safeAnalysisError(error: unknown): AnalysisError {
 export async function analyzeArticle(article: Article, generator: AnalysisGenerator = generate, observability?: AiObservabilityContext): Promise<NewAnalysis> {
   validateAnalysisInput(article);
   if (generator === generate) checkAnalysisConfiguration();
+  let feedback: string | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const result = await generator(article, attempt === 1, observability);
+      const result = await generator(article, attempt === 1, observability, feedback);
       return toStoredAnalysis(result.output, `${article.title}\n${article.raw_text}`, result.model);
     } catch (error) {
       const safe = safeAnalysisError(error);
-      if (safe.code !== "invalid_output" || attempt === 1) throw safe;
+      if (!safe.code.startsWith("invalid_output") || attempt === 1) throw safe;
+      feedback = validationFeedback[safe.code] ?? "Return every required field with its specified type and bounds.";
     }
   }
   throw new AnalysisError("invalid_output");

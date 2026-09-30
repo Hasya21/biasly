@@ -4,6 +4,7 @@ import { apiError, requireAdmin } from "@/lib/api/admin";
 import { readAnalysisOptions, runAnalysis } from "@/lib/pipeline/analyze";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 export async function POST(request: Request) {
   try {
     requireAdmin(request);

@@ -1,7 +1,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { ApiError } from "../api/admin";
-import { claimRetryableRun, finishScheduleRun } from "../supabase/queries/schedules";
+import { claimRetryableRun, finishScheduleRun, markScheduleAttempt } from "../supabase/queries/schedules";
 import { ScrapeError } from "../scraping/oxylabs";
 import { publisherUrl } from "../parsing/urls";
 import { processHomepage, defaultScrapeDependencies, type ScrapeOptions, type ScrapeSummary } from "./scrape";
@@ -10,7 +10,7 @@ import { remainingTime, requireTime, withinBudget, withoutBudget, withinRequestB
 import { withPipelineLease } from "./lease";
 import { SCHEDULED_PROCESSING_BUDGET_MS, SCHEDULER_REQUEST_BUDGET_MS } from "./limits";
 
-export const processingDependencies = { ...scheduleDependencies, scrape: defaultScrapeDependencies, claim: claimRetryableRun, finish: finishScheduleRun, reconcile: reconcileSchedules };
+export const processingDependencies = { ...scheduleDependencies, scrape: defaultScrapeDependencies, claim: claimRetryableRun, finish: finishScheduleRun, markAttempt: markScheduleAttempt, reconcile: reconcileSchedules };
 export type ProcessingDependencies = typeof processingDependencies;
 export type ScheduledSummary = ScrapeSummary & { jobs_completed: number; jobs_skipped: number; jobs_failed: number; jobs_deferred: number; source_errors: number; sync_failed: number };
 
@@ -30,7 +30,9 @@ export async function processScheduledResults(options: ScrapeOptions, deps: Proc
     const sync = await deps.reconcile(deps, active);
     summary.sync_failed = sync.failed;
     const schedules = await deps.schedules();
-    const selected = active.filter(source => !options.sourceIds || options.sourceIds.includes(source.id));
+    const lastAttempt = new Map(schedules.map(row => [row.source_id, row.last_attempted_at ? Date.parse(row.last_attempted_at) : 0]));
+    const selected = active.filter(source => !options.sourceIds || options.sourceIds.includes(source.id))
+      .sort((a, b) => (lastAttempt.get(a.id) ?? 0) - (lastAttempt.get(b.id) ?? 0) || a.id.localeCompare(b.id));
     for (const source of selected) {
       requireTime(40_000);
       summary.sources_checked++;
@@ -39,6 +41,8 @@ export async function processScheduledResults(options: ScrapeOptions, deps: Proc
       try {
         const schedule = schedules.find(row => row.source_id === source.id && row.state === "active" && row.listing_url === source.listing_url);
         if (!schedule) throw new ScrapeError("scheduler_missing_mapping");
+        // Persist before provider calls, so a slow/failing source also yields its next turn.
+        await deps.markAttempt(schedule.id);
         // Newest pages first: old provider results may expire after 24 hours.
         const runs = (await deps.provider.runs(schedule.schedule_id)).sort((a, b) => BigInt(a.run_id) > BigInt(b.run_id) ? -1 : BigInt(a.run_id) < BigInt(b.run_id) ? 1 : 0);
         for (const run of runs) for (const job of run.jobs) {

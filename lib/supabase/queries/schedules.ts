@@ -4,6 +4,13 @@ import type { Json, NewRun, NewSchedule, Schedule, ScheduleRun } from "../types"
 import { checkError, externalId, httpUrl, pageBounds, uuid } from "../validation";
 import { safeContext } from "./logs";
 
+export async function markScheduleAttempt(id: string): Promise<void> {
+  const { data, error } = await getSupabaseAdmin().from("oxylabs_schedules")
+    .update({ last_attempted_at: new Date().toISOString() }).eq("id", uuid(id)).select("id").single();
+  checkError(error, "record schedule attempt");
+  if (!data) throw new Error("Schedule attempt returned no row.");
+}
+
 export async function saveSchedule(input: NewSchedule): Promise<Schedule> {
   if (!["active", "inactive"].includes(input.state)) throw new Error("Invalid schedule state.");
   const row = { source_id: uuid(input.source_id), schedule_id: externalId(input.schedule_id), state: input.state,
